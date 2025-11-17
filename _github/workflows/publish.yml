@@ -1,0 +1,396 @@
+# ==============================================================================
+# 📦 Publish to vcpkg Registry - Automated Library Publishing Pipeline
+# ==============================================================================
+# 
+# Purpose: Automatically publishes C++ libraries to Ridge Trading Group's private vcpkg
+# registry with comprehensive validation, testing, and rollback capabilities.
+# 
+# Features:
+# • Automatic source tarball download from GitHub releases
+# • Dynamic vcpkg port file generation preserving upstream metadata
+# • Dual testing strategy: overlay-ports validation + actual registry integration
+# • Robust error handling with GitHub Actions UI annotations and collapsible logs
+# • Automatic rollback mechanism on test failures to prevent registry corruption
+# • Private repository support with secure GitHub token authentication
+# • vcpkg caching strategies for improved CI performance
+# • Cross-repository operations with conflict detection and resolution
+# • Clean semantic version validation matching release-tag.yml requirements
+# 
+# Workflow Process:
+# 1. validate-release → Validates release tag format and ensures latest version
+# 2. download-source → Downloads GitHub's automatic source tarball for the release
+# 3. generate-port → Creates vcpkg portfile.cmake and vcpkg.json using source metadata
+# 4. update-registry → Updates registry version database and commits changes to vcpkg-ridge
+# 5. test-overlay → Tests library consumability using project's tests/downstream directory
+# 6. test-registry → Performs final integration test with actual private registry
+# 7. rollback → Automatically reverts registry changes if any test fails
+# 
+# Trigger:
+# • Automatically triggered when a GitHub release is published
+# • Supports only clean semantic version tags (v1.0.0) - no pre-release suffixes
+# ==============================================================================
+
+name: 📦 Publish to vcpkg Registry
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # ==============================================================================
+  # Publish to Registry Job - Complete vcpkg Registry Publishing Pipeline
+  # ==============================================================================
+  # Handles the entire lifecycle from release validation to registry integration,
+  # with comprehensive error handling and automatic rollback capabilities.
+  publish-to-registry:
+    name: 📦 Publish • vcpkg Registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout vcpkg registry
+        uses: actions/checkout@v5
+        with:
+          repository: ridgetradinggroup/vcpkg-ridge
+          token: ${{ secrets.VCPKG_REGISTRY_TOKEN }}
+          path: registry
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify tag format and latest version
+        run: |
+          set -euo pipefail
+          # Get repository name and tag from release event
+          REPO_NAME=$(echo ${{ github.repository }} | cut -d'/' -f2)
+          TAG_VERSION=${{ github.event.release.tag_name }}
+          echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+          echo "TAG_VERSION=$TAG_VERSION" >> $GITHUB_ENV
+          echo "Release tag: $TAG_VERSION"
+          
+          # Check if tag matches clean version pattern (same as release-tag.yml)
+          if ! echo "$TAG_VERSION" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' > /dev/null; then
+            echo "::error::Release tag ($TAG_VERSION) does not match clean version pattern"
+            echo "❌ ERROR: Release tag ($TAG_VERSION) does not match clean version pattern"
+            echo "This workflow only supports clean version tags (v1.0.0), not suffixed tags (v1.0.0-alpha)"
+            echo "This restriction matches the release-tag.yml workflow pattern."
+            exit 1
+          fi
+          
+          echo "✅ Tag format is valid (clean version)"
+
+      - name: Checkout source repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          path: source_repo
+
+      - name: Setup C++ Environment
+        uses: ./source_repo/.github/actions/setup-env
+        with:
+          compiler: gcc
+          enable-ccache: false
+
+      - name: Setup vcpkg
+        uses: ./source_repo/.github/actions/setup-vcpkg
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+
+      - name: Verify this is the latest version
+        run: |
+          set -euo pipefail
+          cd source_repo
+          
+          # Get the latest tag from local repository (more reliable than remote)
+          LATEST_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -n1)
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Check if this release is for the latest version
+          if [ "$TAG_VERSION" != "$LATEST_TAG" ]; then
+            echo "::error::Release tag ($TAG_VERSION) is not the latest version ($LATEST_TAG)"
+            echo "❌ ERROR: Release tag ($TAG_VERSION) is not the latest version ($LATEST_TAG)"
+            echo "This workflow only processes releases for the latest version to prevent registry downgrades."
+            echo "If you need to register an older version, please do so manually."
+            exit 1
+          fi
+          
+          echo "✅ Confirmed: This release is for the latest version"
+
+      - name: Download source tarball
+        run: |
+          # Download GitHub's automatic source tarball (same as vcpkg-releaser does)
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG_VERSION}.tar.gz"
+          echo "Downloading: $TARBALL_URL"
+          
+          curl -L -H "Authorization: token ${{ secrets.VCPKG_REGISTRY_TOKEN }}" \
+               -o source.tar.gz "$TARBALL_URL"
+          
+          echo "✅ Downloaded source tarball for $TAG_VERSION"
+
+      - name: Compute checksum
+        id: checksum
+        run: |
+          # Compute SHA512 checksum using vcpkg
+          echo "::group::Computing SHA512 checksum"
+          HASH=$(vcpkg hash source.tar.gz sha512)
+          echo "HASH=$HASH" >> $GITHUB_ENV
+          echo "Computed SHA512: $HASH"
+          echo "::endgroup::"
+
+      - name: Extract source tarball
+        run: |
+          # Extract the downloaded tarball to access existing vcpkg.json and tests/downstream
+          mkdir -p source_extracted
+          tar -xzf source.tar.gz -C source_extracted --strip-components=1
+          echo "✅ Extracted source tarball"
+
+      - name: Extract vcpkg package name
+        run: |
+          # Extract the actual vcpkg package name from source vcpkg.json
+          echo "::group::Extract vcpkg package name from source"
+          
+          VCPKG_PACKAGE_NAME=$(python3 source_repo/.github/scripts/generate_port_files.py --get-name)
+          
+          if [ $? -ne 0 ] || [ -z "$VCPKG_PACKAGE_NAME" ]; then
+            echo "::error::Failed to extract vcpkg package name"
+            echo "❌ ERROR: Could not get package name from source_extracted/vcpkg.json"
+            exit 1
+          fi
+          
+          echo "VCPKG_PACKAGE_NAME=$VCPKG_PACKAGE_NAME" >> $GITHUB_ENV
+          echo "✅ Extracted vcpkg package name: $VCPKG_PACKAGE_NAME"
+          echo "::endgroup::"
+
+      - name: Generate port files
+        run: |
+          set -euo pipefail
+          echo "::group::Generate portfile.cmake and vcpkg.json using Python script"
+          
+          # Use standalone Python script to generate port files
+          if ! python3 source_repo/.github/scripts/generate_port_files.py; then
+            echo "::error::Python port file generation script failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "::group::Format vcpkg.json with vcpkg format-manifest"
+          echo "Formatting vcpkg.json with vcpkg format-manifest..."
+          if ! vcpkg format-manifest registry/ports/$VCPKG_PACKAGE_NAME/vcpkg.json; then
+            echo "::error::vcpkg format-manifest failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "::group::Verify generated files"
+          echo "✅ Port files generated and formatted in registry/ports/$VCPKG_PACKAGE_NAME/"
+          echo "Generated files:"
+          ls -la registry/ports/$VCPKG_PACKAGE_NAME/
+          echo ""
+          echo "portfile.cmake size: $(wc -l < registry/ports/$VCPKG_PACKAGE_NAME/portfile.cmake) lines"
+          echo "vcpkg.json size: $(wc -c < registry/ports/$VCPKG_PACKAGE_NAME/vcpkg.json) bytes"
+          echo "::endgroup::"
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Update registry version database
+        timeout-minutes: 5
+        run: |
+          cd registry
+          
+          # Ensure baseline.json exists (required for vcpkg registry)
+          if [ ! -f "versions/baseline.json" ]; then
+            echo "Creating missing baseline.json file..."
+            mkdir -p versions
+            echo '{"default": {}}' > versions/baseline.json
+            echo "✅ Created baseline.json"
+          fi
+          
+          # Add version to registry database (critical for vcpkg registry)
+          echo "Updating vcpkg registry version database..."
+          echo "::group::vcpkg x-add-version output"
+          vcpkg --x-builtin-ports-root=./ports \
+                --x-builtin-registry-versions-dir=./versions \
+                x-add-version --all --verbose
+          echo "::endgroup::"
+          
+          echo "✅ Registry version database updated"
+
+      - name: Test downstream build with overlay-ports
+        timeout-minutes: 15
+        run: |
+          # Debug: Show what was extracted
+          echo "::group::Debug extracted source structure"
+          ls -la source_extracted/
+          if [ -d "source_extracted/tests" ]; then
+            echo "Contents of tests directory:"
+            ls -la source_extracted/tests/
+          else
+            echo "No tests directory found in extracted source"
+          fi
+          echo "::endgroup::"
+          
+          # Check if tests/downstream exists
+          if [ ! -d "source_extracted/tests/downstream" ]; then
+            echo "⚠️ No tests/downstream directory found, skipping downstream test"
+            exit 0
+          fi
+          
+          # Use the project's existing tests/downstream directory from extracted source
+          cd source_extracted/tests/downstream
+          
+          # Configure downstream test with vcpkg toolchain and overlay-ports
+          echo "Configuring downstream test with overlay-ports..."
+          echo "Debug: VCPKG_ROOT=${VCPKG_ROOT}"
+          echo "Debug: CC=${CC}, CXX=${CXX}"
+          echo "Debug: Checking if vcpkg toolchain exists..."
+          ls -la ${VCPKG_ROOT}/scripts/buildsystems/ || echo "Toolchain directory not found"
+          echo "::group::CMake configure output"
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${CC} \
+            -DCMAKE_CXX_COMPILER=${CXX}
+          echo "::endgroup::"
+          
+          # Build downstream project (vcpkg will install our library from overlay-ports)
+          echo "Building downstream test..."
+          echo "::group::CMake build output"
+          cmake --build build
+          echo "::endgroup::"
+          
+          # Run the downstream test
+          echo "Running downstream test..."
+          echo "::group::Downstream test execution"
+          ./build/downstream_test
+          echo "::endgroup::"
+          
+          echo "✅ Downstream consumability test passed using project's tests/downstream!"
+        env:
+          VCPKG_ROOT: ${{ runner.temp }}/vcpkg
+          VCPKG_OVERLAY_PORTS: ../../../registry/ports
+          AUTHORIZATION_TOKEN: ${{ secrets.VCPKG_REGISTRY_TOKEN }}
+
+      - name: Commit and push changes
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          cd registry
+          
+          # Configure git credentials for commits and authentication
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Safely handle concurrent changes with conflict detection
+          git fetch origin main
+          
+          # Check for merge conflicts before attempting merge
+          if ! git merge --no-commit --no-ff origin/main; then
+            echo "::error::Merge conflicts detected with registry main branch"
+            echo "❌ ERROR: Merge conflicts detected with registry main branch"
+            echo "Manual intervention required to resolve conflicts"
+            git merge --abort
+            exit 1
+          fi
+          
+          # Add both port files and version database changes
+          git add ports/$VCPKG_PACKAGE_NAME
+          git add versions/
+          
+          git commit -m "Update $VCPKG_PACKAGE_NAME to version $TAG_VERSION"
+          
+          # Store commit hash for registry baseline
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          echo "Registry commit hash: $COMMIT_HASH"
+          
+          git push https://x-access-token:${{ secrets.VCPKG_REGISTRY_TOKEN }}@github.com/ridgetradinggroup/vcpkg-ridge.git main
+
+      - name: Test with actual private vcpkg registry
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          
+          # Configure git credentials for private registry access
+          git config --global credential.https://github.com.helper '!f() { echo username=unused; echo password=${{ secrets.VCPKG_REGISTRY_TOKEN }}; }; f'
+          
+          # Check if tests/downstream exists
+          if [ ! -d "source_extracted/tests/downstream" ]; then
+            echo "⚠️ No tests/downstream directory found, skipping registry integration test"
+            exit 0
+          fi
+          
+          # Copy tests/downstream to a clean location for registry testing
+          cp -r source_extracted/tests/downstream final_registry_test
+          cd final_registry_test
+          
+          # Merge our private registry into existing vcpkg-configuration.json (preserve public registries)
+          if [ ! -f "vcpkg-configuration.json" ]; then
+            echo "::error::vcpkg-configuration.json not found in downstream test"
+            echo "❌ ERROR: Downstream test must have vcpkg-configuration.json for registry integration testing"
+            echo "Please ensure tests/downstream/ contains a proper vcpkg-configuration.json file"
+            exit 1
+          fi
+          
+          # Backup original and add our private registry to existing config
+          cp vcpkg-configuration.json vcpkg-configuration.json.bak
+          
+          echo "::group::Merge private registry into existing vcpkg configuration"
+          
+          # Use standalone Python script for merging vcpkg configuration
+          if ! python3 ../source_repo/.github/scripts/merge_vcpkg_config.py; then
+            echo "::error::Python vcpkg config merge script failed"
+            echo "::group::Current vcpkg-configuration.json content"
+            cat vcpkg-configuration.json || echo "File not readable"
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          # Test with actual private registry (not overlay ports)
+          echo "Testing with published private vcpkg registry using project's tests/downstream..."
+          echo "Debug: VCPKG_ROOT=${VCPKG_ROOT}"
+          echo "Debug: CC=${CC}, CXX=${CXX}"
+          echo "Debug: Checking if vcpkg toolchain exists..."
+          ls -la ${VCPKG_ROOT}/scripts/buildsystems/ || echo "Toolchain directory not found"
+          
+          # Clean any existing build directory to avoid cache conflicts
+          echo "Cleaning existing build directory..."
+          rm -rf build
+          
+          echo "::group::Registry test CMake configure"
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${CC} \
+            -DCMAKE_CXX_COMPILER=${CXX}
+          echo "::endgroup::"
+          
+          echo "::group::Registry test CMake build"
+          cmake --build build
+          echo "::endgroup::"
+          
+          echo "::group::Registry test execution"
+          ./build/downstream_test
+          echo "::endgroup::"
+          
+          echo "✅ Final integration test passed: Library works from private registry using real tests/downstream!"
+        env:
+          VCPKG_ROOT: ${{ runner.temp }}/vcpkg
+          AUTHORIZATION_TOKEN: ${{ secrets.VCPKG_REGISTRY_TOKEN }}
+        id: registry_test
+
+      - name: Revert registry changes if test failed
+        if: always() && steps.registry_test.outcome == 'failure'
+        timeout-minutes: 3
+        run: |
+          cd registry
+          
+          echo "❌ Registry test failed, reverting changes..."
+          
+          # Reset to previous commit (before our changes)
+          git reset --hard HEAD~1
+          git push https://x-access-token:${{ secrets.VCPKG_REGISTRY_TOKEN }}@github.com/ridgetradinggroup/vcpkg-ridge.git main --force
+          
+          echo "🔄 Registry changes reverted due to test failure"
+          exit 1
+

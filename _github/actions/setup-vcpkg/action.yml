@@ -1,0 +1,116 @@
+# ==============================================================================
+# 📦 Setup vcpkg - Custom Composite Action
+# ==============================================================================
+# 
+# Purpose: Sets up Microsoft vcpkg C++ package manager for dependency management
+# 
+# What it does:
+# • Clones the official Microsoft vcpkg repository
+# • Bootstraps vcpkg for the target platform (Windows/Linux/macOS)
+# • Configures VCPKG_ROOT environment variable and PATH
+# • Prepares vcpkg for manifest mode operation with vcpkg.json
+# • Verifies installation by testing vcpkg binary
+# 
+# Usage: Replace microsoft/setup-vcpkg@v1 (which doesn't exist) with this action
+# ==============================================================================
+
+name: Setup vcpkg
+description: >
+  A reusable composite action to set up vcpkg C++ package manager from a clean clone,
+  bootstrap it for the target platform, and configure environment for manifest mode.
+  Supports both Windows and Unix-like systems with proper cross-platform handling.
+
+inputs:
+  vcpkgDirectory:
+    description: 'Directory path where vcpkg will be cloned and bootstrapped'
+    required: true
+    default: ${{ runner.temp }}/vcpkg
+
+runs:
+  using: "composite"
+  steps:
+    # Clone the official Microsoft vcpkg repository to specified directory
+    # Validates existing directory or clones fresh if invalid/missing
+    - name: Clone vcpkg repository
+      shell: bash
+      run: |
+        # ==============================================================================
+        # Clone vcpkg Repository from Official Microsoft Source
+        # ==============================================================================
+        # Check if vcpkg directory exists and contains valid vcpkg installation
+        if [[ -d "${{ inputs.vcpkgDirectory }}" ]] && [[ -f "${{ inputs.vcpkgDirectory }}/bootstrap-vcpkg.sh" ]]; then
+          echo "✅ vcpkg directory already exists with valid installation, skipping clone"
+        else
+          if [[ -d "${{ inputs.vcpkgDirectory }}" ]]; then
+            echo "⚠️  vcpkg directory exists but appears corrupted, removing and re-cloning"
+            rm -rf "${{ inputs.vcpkgDirectory }}"
+          fi
+          echo "📥 Cloning vcpkg repository to ${{ inputs.vcpkgDirectory }}"
+          git clone https://github.com/Microsoft/vcpkg.git ${{ inputs.vcpkgDirectory }}
+          echo "✅ vcpkg repository cloned successfully"
+        fi
+
+    # Bootstrap vcpkg for the target platform (Windows or Unix-like systems)
+    # Uses appropriate bootstrap script based on runner operating system
+    - name: Bootstrap vcpkg
+      shell: bash
+      run: |
+        # ==============================================================================
+        # Bootstrap vcpkg for Target Platform
+        # ==============================================================================
+        cd ${{ inputs.vcpkgDirectory }}
+        
+        # Check if vcpkg is already bootstrapped
+        if [[ -f "./vcpkg" ]] || [[ -f "./vcpkg.exe" ]]; then
+          echo "✅ vcpkg already bootstrapped, skipping bootstrap step"
+        else
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "🔧 Bootstrapping vcpkg for Windows platform"
+            ./bootstrap-vcpkg.bat
+          else
+            echo "🔧 Bootstrapping vcpkg for Unix-like platform"
+            chmod +x ./bootstrap-vcpkg.sh
+            ./bootstrap-vcpkg.sh
+          fi
+          echo "✅ vcpkg bootstrap completed successfully"
+        fi
+
+    # Configure vcpkg environment variables and PATH for downstream usage
+    # Sets VCPKG_ROOT and adds vcpkg binary to PATH for subsequent steps
+    - name: Set vcpkg environment
+      shell: bash
+      run: |
+        # ==============================================================================
+        # Configure vcpkg Environment Variables and PATH
+        # ==============================================================================
+        echo "Setting VCPKG_ROOT environment variable"
+        echo "VCPKG_ROOT=${{ inputs.vcpkgDirectory }}" >> $GITHUB_ENV
+        echo "Adding vcpkg binary to PATH"
+        echo "${{ inputs.vcpkgDirectory }}" >> $GITHUB_PATH
+
+    # Verify vcpkg setup and prepare for manifest mode operation
+    # vcpkg will automatically detect and use vcpkg.json when present
+    - name: Verify vcpkg installation
+      shell: bash
+      run: |
+        # ==============================================================================
+        # Verify vcpkg Installation and Prepare for Manifest Mode
+        # ==============================================================================
+        # Verify vcpkg binary exists and is executable
+        VCPKG_BINARY="${{ inputs.vcpkgDirectory }}/vcpkg"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          VCPKG_BINARY="${{ inputs.vcpkgDirectory }}/vcpkg.exe"
+        fi
+        
+        if [[ ! -f "$VCPKG_BINARY" ]]; then
+          echo "❌ vcpkg binary not found at $VCPKG_BINARY"
+          exit 1
+        fi
+        
+        echo "✅ vcpkg setup complete"
+        echo "📍 vcpkg binary location: $VCPKG_BINARY"
+        echo "🔧 Manifest mode will automatically detect vcpkg.json when present"
+        
+        # Test vcpkg binary is working and display version
+        echo "🧪 Testing vcpkg binary:"
+        "$VCPKG_BINARY" version

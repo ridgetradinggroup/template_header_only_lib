@@ -1,0 +1,253 @@
+# ==============================================================================
+# 🚀 Header-Only Library Test - Specialized CI/CD Pipeline
+# ==============================================================================
+#
+# Purpose: Complete CI/CD pipeline optimized specifically for header-only C++ libraries
+#
+# Features:
+# • Template syntax validation (Jinja2 rendering verification)
+# • Header-only compliance checks (inline function validation)
+# • Unit testing with Google Test (behavior validation)
+# • Integration testing (downstream find_package() consumption)
+# • Fast execution (no compilation overhead)
+# • Minimal resource usage (no ccache, artifacts, or build matrices)
+#
+# Workflow Architecture:
+# 1. validate → Template syntax and header-only compliance checks
+# 2. unit-tests → Google Test suite execution
+# 3. integration-tests → Downstream consumption validation
+#
+# Optimized for Header-Only Libraries:
+# • No compilation steps (INTERFACE libraries)
+# • No build artifacts or caching
+# • Single configuration testing (sufficient for headers)
+# • Focus on template validation and consumption patterns
+# ==============================================================================
+
+name: 🚀 Header-Only Test CI
+
+on:
+  push:
+    branches:
+      - '**'  # All branches
+  pull_request:
+
+jobs:
+  # ==============================================================================
+  # Template & Compliance Validation - Header-Only Specific Checks
+  # ==============================================================================
+  # Validates that the template syntax is correct and all functions follow
+  # header-only patterns (inline functions, no .cpp files in main library)
+  validate:
+    name: ✅ Validate • Template & Compliance
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      # Checkout source code for validation
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Setup minimal environment (CMake only, no compilation tools)
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          compiler: gcc
+          enable-ccache: false
+          install-vcpkg: false
+
+      # Validate Jinja2 template syntax throughout the project
+      - name: Validate Template Syntax
+        run: |
+          echo "🔍 Checking for template variables in source files..."
+          TEMPLATE_FILES=$(find . -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cmake" -o -name "*.md" | grep -v _github | xargs grep -l "{{" | wc -l)
+          if [[ $TEMPLATE_FILES -gt 0 ]]; then
+            echo "✅ Found $TEMPLATE_FILES files with template variables"
+            find . -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cmake" -o -name "*.md" | grep -v _github | xargs grep -l "{{"
+          else
+            echo "⚠️  No template variables found - this may indicate an issue"
+          fi
+
+      # Verify header-only library compliance
+      - name: Verify Header-Only Compliance
+        run: |
+          echo "🔍 Checking header-only library compliance..."
+
+          # Check for inline functions in headers
+          INLINE_COUNT=$(grep -r "inline" include/ | wc -l || echo "0")
+          echo "📋 Found $INLINE_COUNT inline function declarations"
+          if [[ $INLINE_COUNT -eq 0 ]]; then
+            echo "⚠️  WARNING: No inline functions found in include/ directory"
+            echo "   Header-only libraries should have inline function implementations"
+          fi
+
+          # Check for .cpp files in main library (should only be tests/examples)
+          CPP_FILES=$(find . -name "*.cpp" | grep -v tests | grep -v examples | grep -v build | wc -l)
+          echo "📋 Found $CPP_FILES .cpp files outside tests/examples"
+          if [[ $CPP_FILES -gt 0 ]]; then
+            echo "❌ ERROR: Found .cpp files in main library (violates header-only pattern)"
+            find . -name "*.cpp" | grep -v tests | grep -v examples | grep -v build
+            exit 1
+          fi
+
+          echo "✅ Header-only compliance verified"
+
+      # Basic CMake configuration test (configure-only, no build)
+      - name: Test CMake Configuration
+        run: |
+          echo "🔧 Testing CMake INTERFACE library configuration..."
+          mkdir -p build-test
+          cd build-test
+
+          # Configure with basic settings (no vcpkg needed for this test)
+          cmake .. -DBUILD_TESTING=OFF
+
+          # Verify INTERFACE library was created
+          if grep -q "add_library.*INTERFACE" ../CMakeLists.txt; then
+            echo "✅ CMake INTERFACE library configuration verified"
+          else
+            echo "❌ ERROR: CMakeLists.txt does not use INTERFACE library pattern"
+            exit 1
+          fi
+
+          cd ..
+          rm -rf build-test
+
+  # ==============================================================================
+  # Unit Tests - Google Test Execution for Header-Only Functions
+  # ==============================================================================
+  # Tests the behavior of inline functions using Google Test framework
+  # Since functions are inline, we still need to verify their behavior
+  unit-tests:
+    name: 🧪 Unit Tests • Debug • GCC
+    needs: validate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      # Checkout source code for testing
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Setup environment with vcpkg for Google Test
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          compiler: gcc
+          enable-ccache: false
+          install-vcpkg: true
+
+      # Setup vcpkg for testing dependencies
+      - name: Setup vcpkg
+        timeout-minutes: 10
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+
+      # Configure CMake with testing enabled
+      - name: Configure CMake
+        run: |
+          echo "🔧 Configuring CMake with testing enabled..."
+          cmake --preset debug
+
+      # Build only the test executables (not the INTERFACE library)
+      - name: Build Tests
+        run: |
+          echo "🔨 Building unit test executables..."
+          cmake --build --preset debug
+
+      # Execute unit tests
+      - name: Run Unit Tests
+        run: |
+          echo "🧪 Running unit tests..."
+          cd build/debug
+
+          # Verify tests exist
+          if ! ctest --show-only=json-v1 2>/dev/null | grep -q '"name"'; then
+            echo "⚠️  No unit tests found"
+            exit 0
+          fi
+
+          echo "📋 Available tests:"
+          ctest --show-only --quiet
+
+          # Run tests with detailed output
+          if ctest --output-on-failure --verbose; then
+            echo "✅ All unit tests passed"
+          else
+            echo "❌ Unit tests failed"
+            exit 1
+          fi
+
+          cd ../..
+
+      # Upload test logs on failure
+      - name: Upload Test Logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-logs
+          path: |
+            build/**/Testing/**/*.log
+          if-no-files-found: warn
+
+  # ==============================================================================
+  # Integration Tests - Downstream Consumption Validation
+  # ==============================================================================
+  # Validates that the header-only library can be consumed by downstream projects
+  # Tests find_package() integration and header inclusion patterns
+  integration-tests:
+    name: 🔗 Integration • Downstream Consumption
+    needs: [validate, unit-tests]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      # Checkout source code for integration testing
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Setup environment for integration tests
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          compiler: gcc
+          enable-ccache: false
+          install-vcpkg: true
+
+      # Setup vcpkg for integration testing
+      - name: Setup vcpkg
+        timeout-minutes: 10
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+
+      # Run comprehensive downstream compatibility tests
+      - name: Run Downstream Tests
+        run: |
+          echo "🔗 Running downstream compatibility tests..."
+          echo "Testing find_package() consumption patterns for header-only library"
+          chmod +x tests/test_downstream.sh
+
+          # Run integration tests (header-only libraries test faster)
+          if ./tests/test_downstream.sh; then
+            echo "✅ All downstream integration tests passed"
+          else
+            echo "❌ Downstream integration tests failed"
+            exit 1
+          fi
+
+      # Upload downstream logs on failure
+      - name: Upload Downstream Logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: downstream-test-logs
+          path: downstream-logs/**/*.log
+          if-no-files-found: warn

@@ -1,0 +1,215 @@
+# ==============================================================================
+# 🔨 Header-Only Build - Configuration-Only Workflow
+# ==============================================================================
+#
+# Purpose: CMake configuration workflow optimized for header-only C++ libraries
+#
+# Features:
+# • CMake configuration without compilation (INTERFACE libraries)
+# • CMakeCache.txt generation for version validation
+# • Minimal resource usage (no ccache, build artifacts, or compilation)
+# • Support for CMake presets and traditional build types
+# • Environment setup integration
+#
+# Reusability Level: 🔨 MODERATELY REUSABLE
+# - Works with any header-only CMake C++ project
+# - Used by release-tag.yml for version validation
+# - Can be used across different header-only repositories
+# - Supports vcpkg integration for dependency management
+#
+# Usage Examples:
+#
+# Basic configuration:
+#   uses: ./.github/workflows/header-only-build.yml
+#   with:
+#     buildType: debug
+#
+# With presets:
+#   uses: ./.github/workflows/header-only-build.yml
+#   with:
+#     cmake-preset: "debug"
+#     enable-testing: true
+#
+# Cross-project usage:
+#   uses: ridgetradinggroup/template-header-only/.github/workflows/header-only-build.yml@main
+#   with:
+#     cmake-args: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+# ==============================================================================
+
+name: 🔨 Header-Only Build
+
+on:
+  workflow_call:
+    inputs:
+      buildType:
+        description: 'CMake build type (debug or release)'
+        required: false
+        type: string
+        default: 'debug'
+      cmake-preset:
+        description: 'CMake configure preset to use (overrides buildType if set)'
+        required: false
+        type: string
+        default: ''
+      cmake-args:
+        description: 'Additional CMake configure arguments'
+        required: false
+        type: string
+        default: ''
+      enable-testing:
+        description: 'Enable testing configuration'
+        required: false
+        type: boolean
+        default: true
+      enable-vcpkg:
+        description: 'Enable vcpkg integration'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # ==============================================================================
+  # Header-Only Configuration Job - Configure INTERFACE Library
+  # ==============================================================================
+  # Configures the CMake project to generate CMakeCache.txt and validate
+  # INTERFACE library setup. No compilation occurs for header-only libraries.
+  configure:
+    name: 🔧 Configure • ${{ inputs.buildType == 'debug' && 'Debug' || 'Release' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    outputs:
+      cmake-cache-generated: ${{ steps.configure.outputs.cache-generated }}
+      build-directory: ${{ steps.configure.outputs.build-dir }}
+
+    steps:
+      # Checkout source code for configuration
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Setup environment for header-only build (minimal setup)
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+        with:
+          compiler: gcc
+          enable-ccache: false
+          install-vcpkg: ${{ inputs.enable-vcpkg }}
+
+      # Setup vcpkg if enabled (needed for testing dependencies)
+      - name: Setup vcpkg
+        if: inputs.enable-vcpkg
+        timeout-minutes: 10
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+
+      # Configure CMake project (header-only configuration)
+      - name: Configure CMake Project
+        id: configure
+        run: |
+          # ==============================================================================
+          # Configure Header-Only CMake Project
+          # ==============================================================================
+          echo "🔧 Configuring header-only CMake project..."
+
+          # Determine configuration approach based on input parameters
+          if [[ -n "${{ inputs.cmake-preset }}" ]]; then
+            echo "Using CMake configure preset: ${{ inputs.cmake-preset }}"
+            CMAKE_CONFIGURE_CMD="cmake --preset ${{ inputs.cmake-preset }}"
+            BUILD_DIR="build/${{ inputs.cmake-preset }}"
+          else
+            echo "Using traditional CMake build type: ${{ inputs.buildType }}"
+            BUILD_DIR="build"
+            CMAKE_CONFIGURE_CMD="cmake -S . -B $BUILD_DIR -DCMAKE_BUILD_TYPE=${{ inputs.buildType }}"
+          fi
+
+          # Append additional CMake arguments if provided
+          if [[ -n "${{ inputs.cmake-args }}" ]]; then
+            CMAKE_CONFIGURE_CMD="$CMAKE_CONFIGURE_CMD ${{ inputs.cmake-args }}"
+          fi
+
+          # Configure testing based on input parameter
+          if [ "${{ inputs.enable-testing }}" == "true" ]; then
+            CMAKE_CONFIGURE_CMD="$CMAKE_CONFIGURE_CMD -DBUILD_TESTING=ON"
+            if [ "${{ inputs.enable-vcpkg }}" == "true" ]; then
+              CMAKE_CONFIGURE_CMD="$CMAKE_CONFIGURE_CMD -DVCPKG_MANIFEST_FEATURES=test"
+            fi
+            echo "🧪 Testing enabled: BUILD_TESTING=ON"
+          else
+            CMAKE_CONFIGURE_CMD="$CMAKE_CONFIGURE_CMD -DBUILD_TESTING=OFF"
+            echo "⚡ Testing disabled: BUILD_TESTING=OFF"
+          fi
+
+          echo "🔧 Executing CMake configuration: $CMAKE_CONFIGURE_CMD"
+          eval $CMAKE_CONFIGURE_CMD
+
+          # Verify configuration completed successfully
+          if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+            echo "✅ CMake configuration completed successfully"
+            echo "cache-generated=true" >> $GITHUB_OUTPUT
+            echo "build-dir=$BUILD_DIR" >> $GITHUB_OUTPUT
+          else
+            echo "❌ CMake configuration failed - no CMakeCache.txt generated"
+            echo "cache-generated=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # Validate INTERFACE library configuration
+      - name: Validate INTERFACE Library Setup
+        run: |
+          # ==============================================================================
+          # Validate Header-Only INTERFACE Library Configuration
+          # ==============================================================================
+          echo "🔍 Validating INTERFACE library configuration..."
+
+          BUILD_DIR="${{ steps.configure.outputs.build-dir }}"
+
+          # Check CMakeCache.txt for INTERFACE library indicators
+          if grep -q "CMAKE_BUILD_TYPE" "$BUILD_DIR/CMakeCache.txt"; then
+            echo "✅ Build type configuration found"
+          fi
+
+          # Verify no compilation targets exist (header-only specific)
+          if [[ -f "$BUILD_DIR/Makefile" ]]; then
+            # Check that no object files would be generated
+            COMPILE_TARGETS=$(grep -c "\.cpp\.o" "$BUILD_DIR/Makefile" || echo "0")
+            if [[ $COMPILE_TARGETS -eq 0 ]]; then
+              echo "✅ No compilation targets found (correct for INTERFACE library)"
+            else
+              echo "⚠️  Found $COMPILE_TARGETS compilation targets (unexpected for header-only)"
+            fi
+          fi
+
+          # Verify CMakeLists.txt uses INTERFACE pattern
+          if grep -q "add_library.*INTERFACE" CMakeLists.txt; then
+            echo "✅ INTERFACE library pattern detected in CMakeLists.txt"
+          else
+            echo "⚠️  No INTERFACE library pattern found - this may not be a header-only library"
+          fi
+
+          echo "✅ INTERFACE library validation completed"
+
+      # Upload CMakeCache.txt for downstream jobs (version validation)
+      - name: Upload CMake Configuration
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-cache-${{ inputs.buildType }}
+          path: |
+            ${{ steps.configure.outputs.build-dir }}/CMakeCache.txt
+            ${{ steps.configure.outputs.build-dir }}/CMakeFiles/
+          if-no-files-found: error
+          retention-days: 1
+
+      # Upload configuration logs on failure
+      - name: Upload Configuration Logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: configure-logs-${{ inputs.buildType }}
+          path: |
+            ${{ steps.configure.outputs.build-dir }}/CMakeFiles/*.log
+            ${{ steps.configure.outputs.build-dir }}/CMakeFiles/CMakeOutput.log
+            ${{ steps.configure.outputs.build-dir }}/CMakeFiles/CMakeError.log
+          if-no-files-found: warn
