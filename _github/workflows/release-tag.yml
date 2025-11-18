@@ -42,7 +42,6 @@ jobs:
     name: 🔨 CMake Configure for Version Extraction
     uses: ./.github/workflows/header-only-build.yml
     with:
-      compiler: gcc
       buildType: debug
       cmake-args: "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF -Wno-dev"
       enable-testing: false
