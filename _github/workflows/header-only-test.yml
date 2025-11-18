@@ -55,8 +55,6 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           compiler: gcc
-          enable-ccache: false
-          install-vcpkg: false
 
       # Validate Jinja2 template syntax throughout the project
       - name: Validate Template Syntax
@@ -138,8 +136,6 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           compiler: gcc
-          enable-ccache: false
-          install-vcpkg: true
 
       # Setup vcpkg for testing dependencies
       - name: Setup vcpkg
@@ -218,8 +214,6 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           compiler: gcc
-          enable-ccache: false
-          install-vcpkg: true
 
       # Setup vcpkg for integration testing
       - name: Setup vcpkg
@@ -250,4 +244,4 @@ jobs:
         with:
           name: downstream-test-logs
           path: downstream-logs/**/*.log
-          if-no-files-found: warn
+          if-no-files-found: ignore
