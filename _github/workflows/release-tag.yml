@@ -45,6 +45,8 @@ jobs:
       compiler: gcc
       buildType: debug
       cmake-args: "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF -Wno-dev"
+      enable-testing: false
+      enable-vcpkg: false
 
   # ==============================================================================
   # Release Validation Job - Extract and Compare Version Numbers
@@ -82,7 +84,7 @@ jobs:
       - name: Download Build Artifacts from CMake Job
         uses: actions/download-artifact@v4
         with:
-          name: build-artifacts-debug-gcc
+          name: cmake-cache-debug
           path: build/
 
       - name: Extract CMake Version
@@ -182,4 +184,37 @@ jobs:
           echo "   vcpkg    : $VCPKG_VERSION"
           echo "   Tarball  : https://github.com/${{ github.repository }}/archive/refs/tags/$TAG_WITH_V.tar.gz"
           echo ""
-          echo "🎉 Release validation passed! GitHub will create the source tarball automatically."
+          echo "🎉 Release validation passed! Creating GitHub release..."
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🚀 Creating GitHub release for $TAG_WITH_V..."
+
+          # Create release notes
+          RELEASE_NOTES="## Release $TAG_WITH_V
+
+          **Version Information:**
+          - Tag: $TAG_WITH_V
+          - CMake: $CMAKE_VERSION
+          - vcpkg: $VCPKG_VERSION
+
+          **What's Changed:**
+          This release includes version-validated source code for {{ project_name }} header-only library.
+
+          **Installation:**
+          - Download source: [Source code (tar.gz)](https://github.com/${{ github.repository }}/archive/refs/tags/$TAG_WITH_V.tar.gz)
+          - Use with vcpkg: Available in Ridge Trading Group's private vcpkg registry
+
+          ---
+          🤖 Auto-generated release from validated tag push"
+
+          # Create the GitHub release
+          gh release create "$TAG_WITH_V" \
+            --title "Release $TAG_WITH_V" \
+            --notes "$RELEASE_NOTES" \
+            --verify-tag
+
+          echo "✅ GitHub release created successfully!"
+          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG_WITH_V"
