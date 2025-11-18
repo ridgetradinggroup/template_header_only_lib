@@ -56,7 +56,7 @@ fi
 # Set trap for smart cleanup
 trap cleanup_if_appropriate EXIT
 
-echo "=== Testing {{ project_name_vcpkg }} downstream compatibility ==="
+echo "=== Testing {{ project_name_underscore }} downstream compatibility ==="
 
 # Check for vcpkg
 if [ -z "$VCPKG_ROOT" ] || [ ! -f "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" ]; then
@@ -73,9 +73,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
-# Test configurations
+# Test configurations - Header-only libraries don't need static/shared testing
 BUILD_TYPES=("Release" "Debug")
-LIBRARY_TYPES=("OFF" "ON")  # BUILD_SHARED_LIBS: OFF=static, ON=shared
 
 # Function to copy logs to standardized directory
 copy_logs_to_standard_dir() {
@@ -117,101 +116,83 @@ TOTAL_TESTS=0
 PASSED_TESTS=0
 
 for build_type in "${BUILD_TYPES[@]}"; do
-    for lib_type in "${LIBRARY_TYPES[@]}"; do
-        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+    echo ""
+    echo -e "${YELLOW}Testing Configuration $TOTAL_TESTS: ${build_type} build (header-only)${NC}"
+    echo "================================================"
+
+    build_dir="build-test-${build_type,,}"
+    install_dir="${PROJECT_ROOT}/install-test-${build_type,,}"
         
-        if [ "$lib_type" == "ON" ]; then
-            lib_name="shared"
-        else
-            lib_name="static"
-        fi
+    # Step 1: Configure the target library
+    echo "1. Configuring the library..."
+    if cmake -S . -B "${build_dir}" \
+        -DCMAKE_BUILD_TYPE="${build_type}" \
+        -DCMAKE_INSTALL_PREFIX="${install_dir}" \
+        -DVCPKG_MANIFEST_FEATURES=test \
+        -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+        -D{{ project_name_upper }}_EXPORT_BUILD_TREE=ON > /dev/null 2>&1; then
+        echo "   ✓ Configuration successful"
+    else
+        echo -e "   ${RED}✗ Configuration failed${NC}"
+        continue
+    fi
         
-        echo ""
-        echo -e "${YELLOW}Testing Configuration $TOTAL_TESTS: ${build_type} build with ${lib_name} library${NC}"
-        echo "================================================"
+    # Step 2: Build the target library
+    echo "2. Building the library..."
+    if cmake --build "${build_dir}" > /dev/null 2>&1; then
+        echo "   ✓ Build successful"
+    else
+        echo -e "   ${RED}✗ Build failed${NC}"
+        continue
+    fi
+
+    # Step 3: Install the target library
+    echo "3. Installing the library to ${install_dir}..."
+    if cmake --install "${build_dir}" > /dev/null 2>&1; then
+        echo "   ✓ Installation successful"
+    else
+        echo -e "   ${RED}✗ Installation failed${NC}"
+        continue
+    fi
         
-        build_dir="build-test-${build_type,,}-${lib_name}"
-        install_dir="${PROJECT_ROOT}/install-test-${build_type,,}-${lib_name}"
+    # Step 4: Test downstream with installed version
+    echo "4. Configuring downstream project..."
+    downstream_build_dir="${build_dir}/downstream-test"
+
+    if cmake -S tests/downstream -B "${downstream_build_dir}" \
+        -DCMAKE_PREFIX_PATH="${install_dir}" \
+        -DCMAKE_BUILD_TYPE="${build_type}" > /dev/null 2>&1; then
+        echo "   ✓ Downstream configuration successful"
+    else
+        echo -e "   ${RED}✗ Downstream configuration failed${NC}"
+        echo "   Check if {{ project_name_underscore }}Config.cmake was installed to ${install_dir}/lib/cmake/{{ project_name_underscore }}/"
+        ls -la "${install_dir}/lib/cmake/{{ project_name_underscore }}/" 2>/dev/null || echo "   Directory not found!"
+        continue
+    fi
         
-        # Step 1: Configure the target library 
-        echo "1. Configuring the library..."
-        if cmake -S . -B "${build_dir}" \
-            -DCMAKE_BUILD_TYPE="${build_type}" \
-            -DBUILD_SHARED_LIBS="${lib_type}" \
-            -DCMAKE_INSTALL_PREFIX="${install_dir}" \
-            -DVCPKG_MANIFEST_FEATURES=test \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-            -DENDTOENDTEST_EXPORT_BUILD_TREE=ON > /dev/null 2>&1; then
-            echo "   ✓ Configuration successful"
-        else
-            echo -e "   ${RED}✗ Configuration failed${NC}"
-            continue
-        fi
-        
-        # Step 2: Build the target library
-        echo "2. Building the library..."
-        if cmake --build "${build_dir}" > /dev/null 2>&1; then
-            echo "   ✓ Build successful"
-        else
-            echo -e "   ${RED}✗ Build failed${NC}"
-            continue
-        fi
-        
-        # Step 3: Install the target library
-        echo "3. Installing the library to ${install_dir}..."
-        if cmake --install "${build_dir}" > /dev/null 2>&1; then
-            echo "   ✓ Installation successful"
-        else
-            echo -e "   ${RED}✗ Installation failed${NC}"
-            continue
-        fi
-        
-        # Step 4: Test downstream with installed version
-        echo "4. Configuring downstream project..."
-        downstream_build_dir="${build_dir}/downstream-test"
-        
-        if cmake -S tests/downstream -B "${downstream_build_dir}" \
-            -DCMAKE_PREFIX_PATH="${install_dir}" \
-            -DCMAKE_BUILD_TYPE="${build_type}" > /dev/null 2>&1; then
-            echo "   ✓ Downstream configuration successful"
-        else
-            echo -e "   ${RED}✗ Downstream configuration failed${NC}"
-            echo "   Check if {{ project_name_vcpkg }}Config.cmake was installed to ${install_dir}/lib/cmake/{{ project_name_vcpkg }}/"
-            ls -la "${install_dir}/lib/cmake/{{ project_name_vcpkg }}/" 2>/dev/null || echo "   Directory not found!"
-            continue
-        fi
-        
-        # Step 5: Build downstream
-        echo "5. Building downstream project..."
-        if cmake --build "${downstream_build_dir}" > /dev/null 2>&1; then
-            echo "   ✓ Downstream build successful"
-        else
-            echo -e "   ${RED}✗ Downstream build failed${NC}"
-            continue
-        fi
-        
-        # Step 6: Run the downstream test
-        echo "6. Running downstream executable..."
-        
-        # Set library path for shared libraries
-        if [ "$lib_type" == "ON" ]; then
-            if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-                export LD_LIBRARY_PATH="${install_dir}/lib:$LD_LIBRARY_PATH"
-            elif [[ "$OSTYPE" == "darwin"* ]]; then
-                export DYLD_LIBRARY_PATH="${install_dir}/lib:$DYLD_LIBRARY_PATH"
-            fi
-        fi
-        
-        if "${downstream_build_dir}/downstream_test" > /dev/null 2>&1; then
-            echo -e "${GREEN}✓ Test PASSED: ${build_type}/${lib_name}${NC}"
-            PASSED_TESTS=$((PASSED_TESTS + 1))
-        else
-            echo -e "${RED}✗ Test FAILED: ${build_type}/${lib_name}${NC}"
-        fi
-        
-        # Copy logs to standardized directory for CI artifact collection
-        copy_logs_to_standard_dir "${build_type}/${lib_name}" "${build_dir}" "${install_dir}"
-    done
+    # Step 5: Build downstream
+    echo "5. Building downstream project..."
+    if cmake --build "${downstream_build_dir}" > /dev/null 2>&1; then
+        echo "   ✓ Downstream build successful"
+    else
+        echo -e "   ${RED}✗ Downstream build failed${NC}"
+        continue
+    fi
+
+    # Step 6: Run the downstream test
+    echo "6. Running downstream executable..."
+
+    if "${downstream_build_dir}/downstream_test" > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ Test PASSED: ${build_type}${NC}"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+    else
+        echo -e "${RED}✗ Test FAILED: ${build_type}${NC}"
+    fi
+
+    # Copy logs to standardized directory for CI artifact collection
+    copy_logs_to_standard_dir "${build_type}" "${build_dir}" "${install_dir}"
 done
 
 # Summary
