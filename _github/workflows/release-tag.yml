@@ -1,25 +1,25 @@
 # ==============================================================================
 # 🏷️ Release Validation - Tag-Based Version Consistency Check
 # ==============================================================================
-# 
+#
 # Purpose: Validates version consistency across CMakeLists.txt, vcpkg.json, and git tags
 # before GitHub creates automatic source tarballs for distribution.
-# 
+#
 # Features:
 # • Robust CMake version extraction via proper configuration and CMakeCache.txt parsing
 # • Support for all vcpkg.json version field variants (version, version-string, version-semver, etc.)
 # • GitHub Actions UI integration with ::error:: annotations and collapsible debug logs
 # • Clean semantic version restriction (v1.0.0 format) - no pre-release suffixes allowed
 # • Production-ready error handling with actionable developer guidance and troubleshooting
-# • Integration with reusable setup-env.yml workflow for consistent environment
-# 
+# • Integration with reusable header-only-build.yml workflow for header-only libraries
+#
 # Workflow Process:
 # 1. Admin pushes semantic version tag (e.g., v1.0.8) to repository
 # 2. header-only-build job configures project using header-only-build.yml
 # 3. validate-release job extracts versions from CMakeCache.txt and vcpkg.json, then compares
 # 4. If validation passes, GitHub automatically creates source tarball
 # 5. Downstream publish.yml workflow can use validated tarball for vcpkg registry
-# 
+#
 # Trigger Pattern:
 # • Only responds to clean semantic version tags: v1.0.0, v2.1.3, etc.
 # • Rejects pre-release tags: v1.0.0-alpha, v1.0.0-beta, v1.0.0-rc1
@@ -43,9 +43,8 @@ jobs:
     uses: ./.github/workflows/header-only-build.yml
     with:
       buildType: debug
-      cmake-args: "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF -Wno-dev"
       enable-testing: false
-      enable-vcpkg: false
+      cmake-args: "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF -Wno-dev"
 
   # ==============================================================================
   # Release Validation Job - Extract and Compare Version Numbers
@@ -57,7 +56,7 @@ jobs:
     needs: header-only-build
     runs-on: ubuntu-22.04
     timeout-minutes: 15
-    
+
     steps:
       - name: Checkout Source
         uses: actions/checkout@v5
@@ -80,17 +79,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3
 
-      - name: Download Build Artifacts from CMake Job
+      - name: Download Build Artifacts from Header-Only Build Job
         uses: actions/download-artifact@v4
         with:
-          name: cmake-cache-debug
+          name: build-artifacts-debug-gcc
           path: build/
 
       - name: Extract CMake Version
         id: cmake-version
         run: |
           echo "::group::Extract CMAKE version from header-only-build job cache"
-          
+
           # Verify CMakeCache.txt exists from header-only-build job
           if [[ ! -f "build/CMakeCache.txt" ]]; then
             echo "::error::CMakeCache.txt not found in build directory from header-only-build job"
@@ -102,18 +101,18 @@ jobs:
             ls -la build/ 2>/dev/null || echo "   build/ directory not found"
             exit 1
           fi
-          
+
           echo "✅ Found CMakeCache.txt from header-only-build job"
-          
+
           # Debug: Show version-related entries in CMakeCache.txt
           echo "🔍 Debug: Version entries in CMakeCache.txt:"
           grep -i "version" build/CMakeCache.txt | head -10 || echo "No version entries found"
-          
+
           # Extract CMAKE_PROJECT_VERSION from CMakeCache.txt (most reliable method)
           CMAKE_VERSION=$(sed -n 's/^CMAKE_PROJECT_VERSION:.*=\(.*\)$/\1/p' build/CMakeCache.txt 2>/dev/null | head -n1 | tr -d ' ')
-          
+
           echo "🔍 Debug: CMAKE_PROJECT_VERSION found: '$CMAKE_VERSION'"
-          
+
           echo "CMAKE_VERSION=$CMAKE_VERSION" >> $GITHUB_ENV
           echo "cmake-version=$CMAKE_VERSION" >> $GITHUB_OUTPUT
           echo "::endgroup::"
@@ -122,15 +121,15 @@ jobs:
         id: vcpkg-version
         run: |
           echo "::group::Extract vcpkg.json version using Python script"
-          
+
           # Use standalone Python script to extract version
           VCPKG_VERSION=$(python3 .github/scripts/extract_vcpkg_version.py)
-          
+
           if [ -z "$VCPKG_VERSION" ]; then
             echo "::error::Failed to extract version from vcpkg.json"
             exit 1
           fi
-          
+
           echo "Extracted vcpkg version: $VCPKG_VERSION"
           echo "VCPKG_VERSION=$VCPKG_VERSION" >> $GITHUB_ENV
           echo "vcpkg-version=$VCPKG_VERSION" >> $GITHUB_OUTPUT
@@ -141,10 +140,10 @@ jobs:
           echo "🎯 Version Consistency Check:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Tag      : $TAG_VERSION"
-          echo "CMake    : $CMAKE_VERSION"  
+          echo "CMake    : $CMAKE_VERSION"
           echo "vcpkg    : $VCPKG_VERSION"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
+
           if [ -z "$CMAKE_VERSION" ]; then
             echo "::error::Failed to extract CMake version from project() declaration"
             echo "❌ Failed to extract CMake version!"
@@ -153,67 +152,34 @@ jobs:
             echo "   The VERSION must be set in the project() command for automatic extraction"
             exit 1
           fi
-          
+
           if [ -z "$VCPKG_VERSION" ]; then
             echo "::error::Failed to extract version from vcpkg.json"
             echo "❌ Failed to extract vcpkg.json version!"
             echo ""
             echo "   Check that ./vcpkg.json has a version field such as:"
             echo "   • \"version\": \"x.y.z\""
-            echo "   • \"version-string\": \"x.y.z\""  
+            echo "   • \"version-string\": \"x.y.z\""
             echo "   • \"version-semver\": \"x.y.z\""
             exit 1
           fi
-          
+
           if [ "$CMAKE_VERSION" != "$TAG_VERSION" ] || [ "$VCPKG_VERSION" != "$TAG_VERSION" ]; then
             echo "::error::Version mismatch! Tag=$TAG_VERSION, CMake=$CMAKE_VERSION, vcpkg=$VCPKG_VERSION"
             echo "❌ Version mismatch!"
             echo ""
             echo "   Tag      : $TAG_VERSION"
-            echo "   CMake    : $CMAKE_VERSION"  
+            echo "   CMake    : $CMAKE_VERSION"
             echo "   vcpkg    : $VCPKG_VERSION"
             echo ""
             echo "Please update ./CMakeLists.txt and/or ./vcpkg.json to match tag version."
             exit 1
           fi
-          
+
           echo "✅ Versions aligned:"
           echo "   Tag      : $TAG_WITH_V"
-          echo "   CMake    : $CMAKE_VERSION"  
+          echo "   CMake    : $CMAKE_VERSION"
           echo "   vcpkg    : $VCPKG_VERSION"
           echo "   Tarball  : https://github.com/${{ github.repository }}/archive/refs/tags/$TAG_WITH_V.tar.gz"
           echo ""
-          echo "🎉 Release validation passed! Creating GitHub release..."
-
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "🚀 Creating GitHub release for $TAG_WITH_V..."
-
-          # Create release notes
-          RELEASE_NOTES="## Release $TAG_WITH_V
-
-          **Version Information:**
-          - Tag: $TAG_WITH_V
-          - CMake: $CMAKE_VERSION
-          - vcpkg: $VCPKG_VERSION
-
-          **What's Changed:**
-          This release includes version-validated source code for {{ project_name }} header-only library.
-
-          **Installation:**
-          - Download source: [Source code (tar.gz)](https://github.com/${{ github.repository }}/archive/refs/tags/$TAG_WITH_V.tar.gz)
-          - Use with vcpkg: Available in Ridge Trading Group's private vcpkg registry
-
-          ---
-          🤖 Auto-generated release from validated tag push"
-
-          # Create the GitHub release
-          gh release create "$TAG_WITH_V" \
-            --title "Release $TAG_WITH_V" \
-            --notes "$RELEASE_NOTES" \
-            --verify-tag
-
-          echo "✅ GitHub release created successfully!"
-          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG_WITH_V"
+          echo "🎉 Release validation passed! GitHub will create the source tarball automatically."

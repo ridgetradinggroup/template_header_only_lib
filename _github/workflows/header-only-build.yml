@@ -192,10 +192,10 @@ jobs:
           echo "✅ INTERFACE library validation completed"
 
       # Upload CMakeCache.txt for downstream jobs (version validation)
-      - name: Upload CMake Configuration
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cmake-cache-${{ inputs.buildType }}
+          name: build-artifacts-${{ inputs.buildType }}-gcc
           path: |
             ${{ steps.configure.outputs.build-dir }}/CMakeCache.txt
             ${{ steps.configure.outputs.build-dir }}/CMakeFiles/
