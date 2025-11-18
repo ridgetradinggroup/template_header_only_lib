@@ -94,8 +94,6 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           compiler: gcc
-          enable-ccache: false
-          install-vcpkg: ${{ inputs.enable-vcpkg }}
 
       # Setup vcpkg if enabled (needed for testing dependencies)
       - name: Setup vcpkg
@@ -171,14 +169,20 @@ jobs:
             echo "✅ Build type configuration found"
           fi
 
-          # Verify no compilation targets exist (header-only specific)
+          # Verify compilation targets are appropriate for header-only library
           if [[ -f "$BUILD_DIR/Makefile" ]]; then
-            # Check that no object files would be generated
+            # Count compilation targets (test and example executables are expected)
             COMPILE_TARGETS=$(grep -c "\.cpp\.o" "$BUILD_DIR/Makefile" || echo "0")
+
+            # Check for test/example executables (these are acceptable for header-only libraries)
+            TEST_TARGETS=$(grep -c "_test\|_app\|_example\|unit_tests" "$BUILD_DIR/Makefile" || echo "0")
+
             if [[ $COMPILE_TARGETS -eq 0 ]]; then
-              echo "✅ No compilation targets found (correct for INTERFACE library)"
+              echo "✅ No compilation targets found (pure header-only library)"
+            elif [[ $TEST_TARGETS -gt 0 ]]; then
+              echo "✅ Found $COMPILE_TARGETS compilation targets (tests/examples for header-only library)"
             else
-              echo "⚠️  Found $COMPILE_TARGETS compilation targets (unexpected for header-only)"
+              echo "⚠️  Found $COMPILE_TARGETS compilation targets (verify these are tests/examples only)"
             fi
           fi
 

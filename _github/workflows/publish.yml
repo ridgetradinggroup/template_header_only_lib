@@ -87,7 +87,6 @@ jobs:
         uses: ./source_repo/.github/actions/setup-env
         with:
           compiler: gcc
-          enable-ccache: false
 
       - name: Setup vcpkg
         uses: ./source_repo/.github/actions/setup-vcpkg
